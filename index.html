@@ -28,7 +28,6 @@
   <div>
     <button id="startCallBtn">Start Call</button>
     <button id="endCallBtn">End Call</button>
-    <button id="testSupabaseBtn">Test Supabase Connection</button>
   </div>
 
   <div>
@@ -38,55 +37,55 @@
 
   <script>
     const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // anon key
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your real anon key
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-    let localStream, pc, roomName, callActive = false, timerId, role = null;
+    let localStream, pc, roomName, role, callActive = false, timerId;
+    const clientId = crypto.randomUUID();
 
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
 
-    function notify(msg) {
-      console.log(msg);
-      alert(msg);
-    }
-
     // Join room
     document.getElementById("joinBtn").onclick = async () => {
       roomName = document.getElementById("roomInput").value.trim();
-      if (!roomName) return notify("Enter a room name!");
-      notify(`✅ Joined room: ${roomName}`);
-    };
+      if (!roomName) return alert("Enter a room name!");
 
-    // Test Supabase
-    document.getElementById("testSupabaseBtn").onclick = async () => {
-      try {
-        const { error } = await supabaseClient.from("signals").select("*").limit(1);
-        if (error) notify("❌ Supabase test failed: " + error.message);
-        else notify("✅ Supabase connection works!");
-      } catch (err) {
-        notify("❌ Supabase test error: " + err.message);
+      const { data, error } = await supabaseClient.rpc('make_join', {
+        _room: roomName,
+        _clientid: clientId
+      });
+
+      if (error) {
+        if (error.message === "room_full") {
+          alert("❌ Room already has 2 people!");
+        } else {
+          alert("❌ Error joining room: " + error.message);
+        }
+        return;
       }
+
+      role = data;
+      alert(`✅ Joined room "${roomName}" as ${role}`);
     };
 
     // Start call
     document.getElementById("startCallBtn").onclick = async () => {
-      if (!roomName) return notify("Join a room first!");
+      if (!roomName || !role) return alert("Join a room first!");
       if (callActive) return;
 
       callActive = true;
 
-      // Get camera + mic
+      // Get media
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
 
-      // Setup PeerConnection
+      // Create peer connection
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
       pc.ontrack = (event) => {
         remoteVideo.srcObject = event.streams[0];
-        notify("📹 Remote stream received!");
       };
 
       pc.onicecandidate = async (event) => {
@@ -94,12 +93,14 @@
           await supabaseClient.from("signals").insert({
             room: roomName,
             type: "ice",
-            data: event.candidate.toJSON()
+            data: event.candidate.toJSON(),
+            client_id: clientId
           });
+          console.log("📨 Sent ICE candidate.");
         }
       };
 
-      // Subscribe for signals
+      // Subscribe to signals
       supabaseClient
         .channel("room-" + roomName)
         .on("postgres_changes", {
@@ -108,22 +109,25 @@
           table: "signals",
           filter: `room=eq.${roomName}`
         }, async (payload) => {
-          const { type, data } = payload.new;
+          const { type, data, client_id } = payload.new;
+          if (client_id === clientId) return; // ignore own signals
           if (!pc) return;
 
-          if (type === "offer" && role === "callee" && !pc.currentRemoteDescription) {
-            notify("📩 Received offer");
+          if (type === "offer" && role === "callee") {
+            console.log("📥 Got offer, sending answer...");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
-            await supabaseClient.from("signals").insert({ room: roomName, type: "answer", data: answer });
-            notify("📨 Sent answer");
-          } else if (type === "answer" && role === "caller" && pc.signalingState === "have-local-offer") {
-            notify("📩 Received answer");
+            await supabaseClient.from("signals").insert({
+              room: roomName, type: "answer", data: answer, client_id: clientId
+            });
+          } else if (type === "answer" && role === "caller") {
+            console.log("📥 Got answer, setting remote description.");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
           } else if (type === "ice") {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(data));
+              console.log("📥 Added ICE candidate.");
             } catch (e) {
               console.error("Error adding ICE", e);
             }
@@ -131,20 +135,14 @@
         })
         .subscribe();
 
-      // Check if offer already exists
-      const { data: offers } = await supabaseClient.from("signals").select("*").eq("room", roomName).eq("type", "offer");
-
-      if (!offers || offers.length === 0) {
-        // Caller
-        role = "caller";
-        notify("📞 You are the caller. Creating offer...");
+      // Caller creates offer
+      if (role === "caller") {
+        console.log("📞 You are the caller. Creating offer...");
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await supabaseClient.from("signals").insert({ room: roomName, type: "offer", data: offer });
-      } else {
-        // Callee
-        role = "callee";
-        notify("📲 You are the callee. Waiting for offer...");
+        await supabaseClient.from("signals").insert({
+          room: roomName, type: "offer", data: offer, client_id: clientId
+        });
       }
 
       // Timer
@@ -154,7 +152,7 @@
       }
     };
 
-    // End call function
+    // End call
     function endCall(timerEnded = false) {
       if (!callActive) return;
       callActive = false;
@@ -176,9 +174,9 @@
       }
 
       if (timerEnded) {
-        notify("⏰ Timer ended, call closed!");
+        alert("⏰ Timer ended, call closed!");
       } else {
-        notify("📞 Call ended manually.");
+        alert("📞 Call ended manually.");
       }
     }
 
