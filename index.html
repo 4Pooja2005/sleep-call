@@ -90,34 +90,36 @@
         }
       };
 
-      // Subscribe to room signals
-      supabaseClient
-        .channel("room-" + roomName)
-        .on("postgres_changes", {
-          event: "INSERT",
-          schema: "public",
-          table: "signals",
-          filter: `room=eq.${roomName}`
-        }, async (payload) => {
-          const { type, data } = payload.new;
-          if (!pc) return;
+      // Subscribe to room signals (only once per room)
+      if (!window.currentChannel) {
+        window.currentChannel = supabaseClient
+          .channel("room-" + roomName)
+          .on("postgres_changes", {
+            event: "INSERT",
+            schema: "public",
+            table: "signals",
+            filter: `room=eq.${roomName}`
+          }, async (payload) => {
+            const { type, data } = payload.new;
+            if (!pc) return;
 
-          if (type === "offer" && !pc.currentRemoteDescription) {
-            await pc.setRemoteDescription(new RTCSessionDescription(data));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            await supabaseClient.from("signals").insert({ room: roomName, type: "answer", data: answer });
-          } else if (type === "answer" && !pc.currentRemoteDescription) {
-            await pc.setRemoteDescription(new RTCSessionDescription(data));
-          } else if (type === "ice") {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(data));
-            } catch (e) {
-              console.error("Error adding ICE", e);
+            if (type === "offer" && !pc.currentRemoteDescription) {
+              await pc.setRemoteDescription(new RTCSessionDescription(data));
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              await supabaseClient.from("signals").insert({ room: roomName, type: "answer", data: answer });
+            } else if (type === "answer" && !pc.currentRemoteDescription) {
+              await pc.setRemoteDescription(new RTCSessionDescription(data));
+            } else if (type === "ice") {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(data));
+              } catch (e) {
+                console.error("Error adding ICE", e);
+              }
             }
-          }
-        })
-        .subscribe();
+          })
+          .subscribe();
+      }
 
       // Check if someone already offered
       const { data: offers } = await supabaseClient.from("signals").select("*").eq("room", roomName).eq("type", "offer");
@@ -154,6 +156,12 @@
       if (timerId) {
         clearTimeout(timerId);
         timerId = null;
+      }
+
+      // Cleanup subscription
+      if (window.currentChannel) {
+        supabaseClient.removeChannel(window.currentChannel);
+        window.currentChannel = null;
       }
 
       if (timerEnded) {
