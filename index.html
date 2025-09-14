@@ -38,11 +38,10 @@
 
   <script>
     const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // use anon key
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // anon key
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-    let localStream, pc, roomName, callActive = false, timerId;
-    const iceQueue = [];
+    let localStream, pc, roomName, callActive = false, timerId, role = null;
 
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
@@ -76,9 +75,12 @@
       if (callActive) return;
 
       callActive = true;
+
+      // Get camera + mic
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
 
+      // Setup PeerConnection
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
@@ -94,11 +96,10 @@
             type: "ice",
             data: event.candidate.toJSON()
           });
-          console.log("📨 Sent ICE candidate.");
         }
       };
 
-      // Subscribe to room signals
+      // Subscribe for signals
       supabaseClient
         .channel("room-" + roomName)
         .on("postgres_changes", {
@@ -110,38 +111,40 @@
           const { type, data } = payload.new;
           if (!pc) return;
 
-          if (type === "offer" && !pc.currentRemoteDescription) {
+          if (type === "offer" && role === "callee" && !pc.currentRemoteDescription) {
             notify("📩 Received offer");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             await supabaseClient.from("signals").insert({ room: roomName, type: "answer", data: answer });
             notify("📨 Sent answer");
-          } else if (type === "answer" && pc.signalingState === "have-local-offer") {
+          } else if (type === "answer" && role === "caller" && pc.signalingState === "have-local-offer") {
             notify("📩 Received answer");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
           } else if (type === "ice") {
-            if (pc.remoteDescription) {
-              try {
-                await pc.addIceCandidate(new RTCIceCandidate(data));
-              } catch (e) {
-                console.error("Error adding ICE", e);
-              }
-            } else {
-              iceQueue.push(data);
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data));
+            } catch (e) {
+              console.error("Error adding ICE", e);
             }
           }
         })
         .subscribe();
 
-      // Check if an offer already exists
+      // Check if offer already exists
       const { data: offers } = await supabaseClient.from("signals").select("*").eq("room", roomName).eq("type", "offer");
+
       if (!offers || offers.length === 0) {
-        // I am the caller
-        notify("📞 Creating offer...");
+        // Caller
+        role = "caller";
+        notify("📞 You are the caller. Creating offer...");
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await supabaseClient.from("signals").insert({ room: roomName, type: "offer", data: offer });
+      } else {
+        // Callee
+        role = "callee";
+        notify("📲 You are the callee. Waiting for offer...");
       }
 
       // Timer
