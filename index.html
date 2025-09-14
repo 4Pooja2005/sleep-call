@@ -55,12 +55,21 @@
 
       try {
         const { data, error } = await supabaseClient.rpc('make_join', {
-          _room: roomName,
-          _clientid: clientId
-        });
+  _room: roomName,
+  _clientid: clientId
+});
 
-        role = data;
-        alert(`✅ Joined room "${roomName}" as ${role}`);
+console.log("RPC data:", data);
+console.log("RPC error:", error);
+
+if (error) {
+    alert("RPC failed: " + error.message);
+    return;
+}
+
+role = data;
+alert(`Joined room as ${role}`);
+
         startBtn.disabled = false; // enable start call
       } catch (err) {
         if (err.message === "room_full") {
@@ -186,4 +195,5 @@
   </script>
 </body>
 </html>
+
 
