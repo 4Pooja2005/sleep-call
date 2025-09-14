@@ -59,8 +59,6 @@
           _clientid: clientId
         });
 
-        if (error) throw error;
-
         role = data;
         alert(`✅ Joined room "${roomName}" as ${role}`);
         startBtn.disabled = false; // enable start call
@@ -188,3 +186,4 @@
   </script>
 </body>
 </html>
+
