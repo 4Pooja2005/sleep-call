@@ -10,6 +10,7 @@
     input, button { padding: 10px; margin: 5px; border-radius: 5px; border: none; }
     button { background: #4cafef; color: white; cursor: pointer; }
     button:hover { background: #3b8fd4; }
+    button:disabled { background: #888; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -26,7 +27,7 @@
   </div>
 
   <div>
-    <button id="startCallBtn">Start Call</button>
+    <button id="startCallBtn" disabled>Start Call</button>
     <button id="endCallBtn">End Call</button>
   </div>
 
@@ -37,7 +38,7 @@
 
   <script>
     const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your anon key
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your real anon key
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
     let localStream, pc, roomName, role, callActive = false, timerId;
@@ -45,6 +46,7 @@
 
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
+    const startBtn = document.getElementById("startCallBtn");
 
     // Join room
     document.getElementById("joinBtn").onclick = async () => {
@@ -57,38 +59,22 @@
           _clientid: clientId
         });
 
-        if (error) {
-          if (error.message === "room_full") {
-            alert("❌ Room already has 2 people!");
-          } else {
-            console.error(error);
-            alert("❌ Error joining room: " + error.message);
-          }
-          return;
-        }
+        if (error) throw error;
 
         role = data;
         alert(`✅ Joined room "${roomName}" as ${role}`);
-
-        // Notify if someone else is already in room
-        const { data: participants } = await supabaseClient
-          .from("signals")
-          .select("client_id")
-          .eq("room", roomName)
-          .neq("client_id", clientId);
-
-        if (participants.length > 0) {
-          alert("📨 Other participant already in room.");
-        }
-
+        startBtn.disabled = false; // enable start call
       } catch (err) {
-        console.error(err);
-        alert("⚠️ RPC call failed.");
+        if (err.message === "room_full") {
+          alert("❌ Room already has 2 people!");
+        } else {
+          alert("❌ Error joining room: " + err.message);
+        }
       }
     };
 
     // Start call
-    document.getElementById("startCallBtn").onclick = async () => {
+    startBtn.onclick = async () => {
       if (!roomName || !role) return alert("Join a room first!");
       if (callActive) return;
 
@@ -98,7 +84,7 @@
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
 
-      // Peer connection
+      // Create peer connection
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
