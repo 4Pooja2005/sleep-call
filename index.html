@@ -37,34 +37,32 @@
   </div>
 
   <script>
-    // --- Supabase Setup ---
     const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // use anon key
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-    // --- State ---
     let localStream, pc, roomName, callActive = false, timerId;
+    const iceQueue = [];
 
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
 
-    // Utility: notify both in alert + console
     function notify(msg) {
       console.log(msg);
       alert(msg);
     }
 
-    // --- Join Room ---
+    // Join room
     document.getElementById("joinBtn").onclick = async () => {
       roomName = document.getElementById("roomInput").value.trim();
-      if (!roomName) return notify("⚠️ Enter a room name!");
+      if (!roomName) return notify("Enter a room name!");
       notify(`✅ Joined room: ${roomName}`);
     };
 
-    // --- Test Supabase ---
+    // Test Supabase
     document.getElementById("testSupabaseBtn").onclick = async () => {
       try {
-        const { data, error } = await supabaseClient.from("signals").select("*").limit(1);
+        const { error } = await supabaseClient.from("signals").select("*").limit(1);
         if (error) notify("❌ Supabase test failed: " + error.message);
         else notify("✅ Supabase connection works!");
       } catch (err) {
@@ -72,25 +70,21 @@
       }
     };
 
-    // --- Start Call ---
+    // Start call
     document.getElementById("startCallBtn").onclick = async () => {
-      if (!roomName) return notify("⚠️ Join a room first!");
-      if (callActive) return notify("⚠️ Call already active.");
+      if (!roomName) return notify("Join a room first!");
+      if (callActive) return;
 
       callActive = true;
-      notify("🎥 Starting call...");
-
-      // Get local media
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
 
-      // Setup peer connection
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
       pc.ontrack = (event) => {
-        notify("📡 Received remote stream!");
         remoteVideo.srcObject = event.streams[0];
+        notify("📹 Remote stream received!");
       };
 
       pc.onicecandidate = async (event) => {
@@ -100,11 +94,11 @@
             type: "ice",
             data: event.candidate.toJSON()
           });
-          notify("📨 Sent ICE candidate.");
+          console.log("📨 Sent ICE candidate.");
         }
       };
 
-      // Subscribe to signals
+      // Subscribe to room signals
       supabaseClient
         .channel("room-" + roomName)
         .on("postgres_changes", {
@@ -117,51 +111,47 @@
           if (!pc) return;
 
           if (type === "offer" && !pc.currentRemoteDescription) {
-            notify("📩 Got offer, sending answer...");
+            notify("📩 Received offer");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             await supabaseClient.from("signals").insert({ room: roomName, type: "answer", data: answer });
-          } else if (type === "answer" && !pc.currentRemoteDescription) {
-            notify("📩 Got answer, setting remote description.");
+            notify("📨 Sent answer");
+          } else if (type === "answer" && pc.signalingState === "have-local-offer") {
+            notify("📩 Received answer");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
           } else if (type === "ice") {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(data));
-              notify("📡 Added ICE candidate.");
-            } catch (e) {
-              console.error("Error adding ICE", e);
+            if (pc.remoteDescription) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(data));
+              } catch (e) {
+                console.error("Error adding ICE", e);
+              }
+            } else {
+              iceQueue.push(data);
             }
           }
         })
         .subscribe();
 
-      // Check if someone already offered
-      const { data: offers } = await supabaseClient
-        .from("signals")
-        .select("*")
-        .eq("room", roomName)
-        .eq("type", "offer");
-
+      // Check if an offer already exists
+      const { data: offers } = await supabaseClient.from("signals").select("*").eq("room", roomName).eq("type", "offer");
       if (!offers || offers.length === 0) {
-        // I'm the caller
-        notify("☎️ Creating offer...");
+        // I am the caller
+        notify("📞 Creating offer...");
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await supabaseClient.from("signals").insert({ room: roomName, type: "offer", data: offer });
-      } else {
-        notify("👀 Offer already exists, waiting for answer...");
       }
 
       // Timer
       const minutes = parseFloat(document.getElementById("timerInput").value);
       if (minutes > 0) {
         timerId = setTimeout(() => endCall(true), minutes * 60 * 1000);
-        notify(`⏰ Timer set for ${minutes} minutes`);
       }
     };
 
-    // --- End Call ---
+    // End call function
     function endCall(timerEnded = false) {
       if (!callActive) return;
       callActive = false;
@@ -182,8 +172,13 @@
         timerId = null;
       }
 
-      notify(timerEnded ? "⏰ Timer ended, call closed!" : "📞 Call ended manually.");
+      if (timerEnded) {
+        notify("⏰ Timer ended, call closed!");
+      } else {
+        notify("📞 Call ended manually.");
+      }
     }
+
     document.getElementById("endCallBtn").onclick = () => endCall(false);
   </script>
 </body>
