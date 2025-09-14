@@ -37,7 +37,7 @@
 
   <script>
     const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your real anon key
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your anon key
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
     let localStream, pc, roomName, role, callActive = false, timerId;
@@ -51,22 +51,40 @@
       roomName = document.getElementById("roomInput").value.trim();
       if (!roomName) return alert("Enter a room name!");
 
-      const { data, error } = await supabaseClient.rpc('make_join', {
-        _room: roomName,
-        _clientid: clientId
-      });
+      try {
+        const { data, error } = await supabaseClient.rpc('make_join', {
+          _room: roomName,
+          _clientid: clientId
+        });
 
-      if (error) {
-        if (error.message === "room_full") {
-          alert("❌ Room already has 2 people!");
-        } else {
-          alert("❌ Error joining room: " + error.message);
+        if (error) {
+          if (error.message === "room_full") {
+            alert("❌ Room already has 2 people!");
+          } else {
+            console.error(error);
+            alert("❌ Error joining room: " + error.message);
+          }
+          return;
         }
-        return;
-      }
 
-      role = data;
-      alert(`✅ Joined room "${roomName}" as ${role}`);
+        role = data;
+        alert(`✅ Joined room "${roomName}" as ${role}`);
+
+        // Notify if someone else is already in room
+        const { data: participants } = await supabaseClient
+          .from("signals")
+          .select("client_id")
+          .eq("room", roomName)
+          .neq("client_id", clientId);
+
+        if (participants.length > 0) {
+          alert("📨 Other participant already in room.");
+        }
+
+      } catch (err) {
+        console.error(err);
+        alert("⚠️ RPC call failed.");
+      }
     };
 
     // Start call
@@ -80,7 +98,7 @@
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
 
-      // Create peer connection
+      // Peer connection
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
