@@ -1,33 +1,34 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Sleep Call — improved</title>
+  <meta charset="UTF-8">
+  <title>Sleep Call 💫</title>
   <script src="https://unpkg.com/@supabase/supabase-js"></script>
   <style>
-    body{font-family:sans-serif;background:#111;color:#eee;text-align:center;padding:18px}
-    video{width:40%;margin:8px;border-radius:10px;border:1px solid #333}
-    input,button{padding:8px;margin:6px;border-radius:6px;border:none}
-    button{background:#4cafef;color:#fff;cursor:pointer}
-    #status{max-width:900px;margin:12px auto;text-align:left;background:#0f1720;padding:10px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.5)}
-    .status-line{font-size:13px;padding:6px 4px;border-bottom:1px solid rgba(255,255,255,0.03)}
-    .status-time{color:#9aa9b2;margin-right:8px}
+    body { font-family: sans-serif; text-align: center; background: #111; color: #eee; }
+    video { width: 40%; margin: 10px; border: 2px solid #444; border-radius: 10px; }
+    input, button { padding: 10px; margin: 5px; border-radius: 5px; border: none; }
+    button { background: #4cafef; color: white; cursor: pointer; }
+    button:hover { background: #3b8fd4; }
   </style>
 </head>
 <body>
   <h1>Sleep Call 💫</h1>
 
   <div>
-    <input id="roomInput" placeholder="room name (unique per test)" />
-    <button id="joinBtn">Join Room (subscribe)</button>
+    <input id="roomInput" type="text" placeholder="Enter room name" />
+    <button id="joinBtn">Join Room</button>
   </div>
 
   <div>
-    <label>Timer (minutes)</label>
+    <label>Set Timer (minutes):</label>
     <input id="timerInput" type="number" placeholder="e.g. 60" />
+  </div>
+
+  <div>
     <button id="startCallBtn">Start Call</button>
     <button id="endCallBtn">End Call</button>
-    <button id="clearBtn">Clear Room Signals</button>
+    <button id="testSupabaseBtn">Test Supabase Connection</button>
   </div>
 
   <div>
@@ -35,363 +36,155 @@
     <video id="remoteVideo" autoplay playsinline></video>
   </div>
 
-  <div id="status" aria-live="polite"></div>
+  <script>
+    // --- Supabase Setup ---
+    const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-<script>
-/* ======= CONFIG - set these to your Supabase values ======= */
-const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU";
-/* ======================================================== */
+    // --- State ---
+    let localStream, pc, roomName, callActive = false, timerId;
 
-const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
 
-// small unique id so we can ignore our own messages
-const clientId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-
-let roomName = null;
-let pc = null;
-let localStream = null;
-let callActive = false;
-let timerId = null;
-
-// subscription guard — only one channel per page/app instance at a time
-// window.supabaseChannel will hold the active channel object
-const statusDiv = document.getElementById('status');
-
-///// UI helpers /////
-function now() {
-  return new Date().toLocaleTimeString();
-}
-function appendStatus(text) {
-  const line = document.createElement('div');
-  line.className = 'status-line';
-  line.innerHTML = `<span class="status-time">[${now()}]</span>${text}`;
-  statusDiv.prepend(line);
-  console.log('[SleepCall]', text);
-}
-async function notifyUser(title, body) {
-  // show on-page plus browser notification if allowed
-  appendStatus(`<strong>${title}</strong> — ${body}`);
-  if (!("Notification" in window)) return;
-  if (Notification.permission === "granted") {
-    new Notification(title, { body });
-  } else if (Notification.permission !== "denied") {
-    try {
-      const p = await Notification.requestPermission();
-      if (p === "granted") new Notification(title, { body });
-    } catch(e) {}
-  }
-}
-
-///// Supabase helpers /////
-async function safeDeleteRoomSignals() {
-  // Attempt to delete old offer/answer/ice for this room
-  try {
-    const { error } = await supabase
-      .from('signals')
-      .delete()
-      .eq('room', roomName)
-      .in('type', ['offer','answer','ice']);
-    if (error) {
-      appendStatus('Could not auto-delete old signals (RLS policy). Continue, but old rows may interfere.');
-      appendStatus('If you want automatic cleanup, add a DELETE policy for the signals table in Supabase.');
-      return false;
-    } else {
-      appendStatus('Old offer/answer/ice rows removed for fresh negotiation.');
-      return true;
+    // Utility: notify both in alert + console
+    function notify(msg) {
+      console.log(msg);
+      alert(msg);
     }
-  } catch (e) {
-    appendStatus('Delete attempt failed: ' + e.message);
-    return false;
-  }
-}
 
-async function subscribeRoom(r) {
-  if (!r) return;
-  // if already subscribed to same room, do nothing
-  if (window.supabaseChannel && window.supabaseChannelRoom === r) {
-    appendStatus('Already subscribed to room: ' + r);
-    return;
-  }
-  // if subscribed to different room, remove it first
-  if (window.supabaseChannel) {
-    try {
-      supabase.removeChannel(window.supabaseChannel);
-    } catch(e){}
-    window.supabaseChannel = null;
-    window.supabaseChannelRoom = null;
-  }
+    // --- Join Room ---
+    document.getElementById("joinBtn").onclick = async () => {
+      roomName = document.getElementById("roomInput").value.trim();
+      if (!roomName) return notify("⚠️ Enter a room name!");
+      notify(`✅ Joined room: ${roomName}`);
+    };
 
-  const ch = supabase
-    .channel('room-' + r)
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'signals',
-      filter: `room=eq.${r}`
-    }, async (payload) => {
-      const row = payload.new;
-      if (!row || !row.type || !row.data) return;
-      // ignore our own signals
-      if (row.data.clientId === clientId) return;
-
-      if (row.type === 'join') {
-        notifyUser('User joined', `Someone joined room ${r}`);
-      } else if (row.type === 'leave') {
-        notifyUser('User left', `Someone left room ${r}`);
-      } else if (row.type === 'offer') {
-        appendStatus('Received remote offer — will answer when ready.');
-        // if we don't have pc, create and attach local tracks
-        if (!pc) await createPeerConnectionAndLocal();
-        try {
-          await pc.setRemoteDescription({ type: row.data.sdpType || 'offer', sdp: row.data.sdp });
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          await supabase.from('signals').insert({
-            room: roomName,
-            type: 'answer',
-            data: { sdp: answer.sdp, sdpType: answer.type, clientId }
-          });
-          appendStatus('Sent answer to remote offer.');
-        } catch (e) {
-          console.error(e);
-          appendStatus('Error handling remote offer: ' + e.message);
-        }
-      } else if (row.type === 'answer') {
-        appendStatus('Received remote answer.');
-        if (pc) {
-          try {
-            await pc.setRemoteDescription({ type: row.data.sdpType || 'answer', sdp: row.data.sdp });
-          } catch (e) {
-            console.warn('Error setting remote answer:', e);
-          }
-        }
-      } else if (row.type === 'ice') {
-        if (pc && row.data && row.data.candidate) {
-          try {
-            await pc.addIceCandidate(row.data.candidate);
-            appendStatus('Added remote ICE candidate.');
-          } catch (e) {
-            console.warn('addIceCandidate failed', e);
-          }
-        }
-      }
-    });
-
-  await ch.subscribe();
-  window.supabaseChannel = ch;
-  window.supabaseChannelRoom = r;
-  appendStatus('Subscribed to signals for room: ' + r);
-}
-
-async function insertJoin() {
-  try {
-    await supabase.from('signals').insert({
-      room: roomName,
-      type: 'join',
-      data: { clientId, ts: new Date().toISOString() }
-    });
-    appendStatus('Inserted join event.');
-  } catch (e) {
-    appendStatus('Failed to insert join: ' + (e.message || e));
-  }
-}
-
-async function getOtherJoins() {
-  try {
-    const { data } = await supabase.from('signals').select('data').eq('room', roomName).eq('type', 'join');
-    if (!data) return 0;
-    const others = data.filter(r => r.data && r.data.clientId && r.data.clientId !== clientId);
-    return others.length;
-  } catch (e) {
-    appendStatus('Could not query join rows: ' + e.message);
-    return 0;
-  }
-}
-
-///// WebRTC helpers /////
-async function createPeerConnectionAndLocal() {
-  if (pc) return pc;
-  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-  pc.ontrack = (ev) => {
-    appendStatus('Remote track received.');
-    if (ev.streams && ev.streams[0]) remoteVideo.srcObject = ev.streams[0];
-  };
-  pc.onicecandidate = async (ev) => {
-    if (ev.candidate) {
+    // --- Test Supabase ---
+    document.getElementById("testSupabaseBtn").onclick = async () => {
       try {
-        await supabase.from('signals').insert({
-          room: roomName,
-          type: 'ice',
-          data: { candidate: ev.candidate.toJSON(), clientId }
-        });
-        appendStatus('Sent local ICE candidate.');
-      } catch (e) {
-        appendStatus('Failed to send ICE: ' + e.message);
+        const { data, error } = await supabaseClient.from("signals").select("*").limit(1);
+        if (error) notify("❌ Supabase test failed: " + error.message);
+        else notify("✅ Supabase connection works!");
+      } catch (err) {
+        notify("❌ Supabase test error: " + err.message);
       }
-    }
-  };
+    };
 
-  if (!localStream) {
-    try {
+    // --- Start Call ---
+    document.getElementById("startCallBtn").onclick = async () => {
+      if (!roomName) return notify("⚠️ Join a room first!");
+      if (callActive) return notify("⚠️ Call already active.");
+
+      callActive = true;
+      notify("🎥 Starting call...");
+
+      // Get local media
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
-      appendStatus('Local camera & mic started.');
-    } catch (e) {
-      appendStatus('getUserMedia failed: ' + e.message);
-      throw e;
+
+      // Setup peer connection
+      pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.ontrack = (event) => {
+        notify("📡 Received remote stream!");
+        remoteVideo.srcObject = event.streams[0];
+      };
+
+      pc.onicecandidate = async (event) => {
+        if (event.candidate) {
+          await supabaseClient.from("signals").insert({
+            room: roomName,
+            type: "ice",
+            data: event.candidate.toJSON()
+          });
+          notify("📨 Sent ICE candidate.");
+        }
+      };
+
+      // Subscribe to signals
+      supabaseClient
+        .channel("room-" + roomName)
+        .on("postgres_changes", {
+          event: "INSERT",
+          schema: "public",
+          table: "signals",
+          filter: `room=eq.${roomName}`
+        }, async (payload) => {
+          const { type, data } = payload.new;
+          if (!pc) return;
+
+          if (type === "offer" && !pc.currentRemoteDescription) {
+            notify("📩 Got offer, sending answer...");
+            await pc.setRemoteDescription(new RTCSessionDescription(data));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await supabaseClient.from("signals").insert({ room: roomName, type: "answer", data: answer });
+          } else if (type === "answer" && !pc.currentRemoteDescription) {
+            notify("📩 Got answer, setting remote description.");
+            await pc.setRemoteDescription(new RTCSessionDescription(data));
+          } else if (type === "ice") {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data));
+              notify("📡 Added ICE candidate.");
+            } catch (e) {
+              console.error("Error adding ICE", e);
+            }
+          }
+        })
+        .subscribe();
+
+      // Check if someone already offered
+      const { data: offers } = await supabaseClient
+        .from("signals")
+        .select("*")
+        .eq("room", roomName)
+        .eq("type", "offer");
+
+      if (!offers || offers.length === 0) {
+        // I'm the caller
+        notify("☎️ Creating offer...");
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await supabaseClient.from("signals").insert({ room: roomName, type: "offer", data: offer });
+      } else {
+        notify("👀 Offer already exists, waiting for answer...");
+      }
+
+      // Timer
+      const minutes = parseFloat(document.getElementById("timerInput").value);
+      if (minutes > 0) {
+        timerId = setTimeout(() => endCall(true), minutes * 60 * 1000);
+        notify(`⏰ Timer set for ${minutes} minutes`);
+      }
+    };
+
+    // --- End Call ---
+    function endCall(timerEnded = false) {
+      if (!callActive) return;
+      callActive = false;
+
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+      localVideo.srcObject = null;
+      remoteVideo.srcObject = null;
+
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+
+      notify(timerEnded ? "⏰ Timer ended, call closed!" : "📞 Call ended manually.");
     }
-  }
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-  return pc;
-}
-
-///// UI actions /////
-document.getElementById('joinBtn').addEventListener('click', async () => {
-  roomName = (document.getElementById('roomInput').value || '').trim();
-  if (!roomName) return alert('Enter a room name');
-  appendStatus('Join button pressed for room: ' + roomName);
-  await subscribeRoom(roomName);      // subscribe first so we hear events
-  await insertJoin();                 // announce presence
-  const otherCount = await getOtherJoins();
-  if (otherCount > 0) {
-    notifyUser('Room active', `${otherCount} other user(s) present in room.`);
-  } else {
-    notifyUser('Room created', 'You created / joined the room. Wait for the other person to join.');
-  }
-});
-
-document.getElementById('clearBtn').addEventListener('click', async () => {
-  if (!roomName) return alert('Join a room first');
-  appendStatus('Clear button pressed — attempting to remove old offer/answer/ice rows.');
-  const ok = await safeDeleteRoomSignals();
-  if (!ok) appendStatus('If delete failed, enable DELETE policy in Supabase (see instructions in status).');
-});
-
-document.getElementById('startCallBtn').addEventListener('click', async () => {
-  if (!roomName) return alert('Join a room first');
-  if (callActive) return alert('Call already active');
-  callActive = true;
-  appendStatus('Start Call pressed.');
-
-  // ensure subscription is active
-  if (!window.supabaseChannel || window.supabaseChannelRoom !== roomName) {
-    await subscribeRoom(roomName);
-  }
-
-  // Try to remove previous call rows if we can (helpful to avoid stale offers)
-  await safeDeleteRoomSignals();
-
-  // Setup pc and local media
-  try {
-    await createPeerConnectionAndLocal();
-  } catch (e) {
-    appendStatus('Could not access camera/mic: ' + e.message);
-    callActive = false;
-    return;
-  }
-
-  // Look for existing remote offer (someone else already started)
-  try {
-    const { data: offers } = await supabase
-      .from('signals')
-      .select('id,type,data')
-      .eq('room', roomName)
-      .eq('type', 'offer')
-      .order('id', { ascending: true })
-      .limit(1);
-
-    const existing = (offers && offers.length) ? offers[0] : null;
-    if (existing && existing.data && existing.data.clientId !== clientId) {
-      appendStatus('Remote offer found -> acting as callee (will answer).');
-      await pc.setRemoteDescription({ type: existing.data.sdpType || 'offer', sdp: existing.data.sdp });
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await supabase.from('signals').insert({
-        room: roomName,
-        type: 'answer',
-        data: { sdp: answer.sdp, sdpType: answer.type, clientId }
-      });
-      appendStatus('Answer inserted.');
-    } else {
-      appendStatus('No remote offer found -> acting as caller (create offer).');
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await supabase.from('signals').insert({
-        room: roomName,
-        type: 'offer',
-        data: { sdp: offer.sdp, sdpType: offer.type, clientId }
-      });
-      appendStatus('Offer inserted.');
-    }
-  } catch (e) {
-    appendStatus('Error during negotiation: ' + e.message);
-    callActive = false;
-    return;
-  }
-
-  // Timer: end call automatically
-  const mins = parseFloat(document.getElementById('timerInput').value);
-  if (mins > 0) {
-    timerId = setTimeout(()=> {
-      appendStatus('Timer expired — ending call.');
-      endCall(true);
-    }, mins * 60 * 1000);
-    appendStatus('Timer set for ' + mins + ' minutes.');
-  }
-});
-
-function endCall(timerEnded = false) {
-  if (!callActive) {
-    appendStatus('End Call pressed but no active call.');
-    return;
-  }
-  callActive = false;
-  appendStatus('Ending call...');
-
-  // notify leave
-  (async () => {
-    try {
-      await supabase.from('signals').insert({
-        room: roomName,
-        type: 'leave',
-        data: { clientId, ts: new Date().toISOString() }
-      });
-    } catch(e) {
-      // ignore
-    }
-  })();
-
-  if (pc) try { pc.close(); } catch(e) {}
-  pc = null;
-
-  if (localStream) {
-    localStream.getTracks().forEach(t => t.stop());
-    localStream = null;
-  }
-  localVideo.srcObject = null;
-  remoteVideo.srcObject = null;
-
-  if (timerId) { clearTimeout(timerId); timerId = null; }
-
-  // remove subscription (so we don't duplicate later)
-  if (window.supabaseChannel) {
-    try {
-      supabase.removeChannel(window.supabaseChannel);
-    } catch(e) {}
-    window.supabaseChannel = null;
-    window.supabaseChannelRoom = null;
-    appendStatus('Realtime subscription removed.');
-  }
-
-  if (timerEnded) notifyUser('Timer ended', 'Call closed by timer.');
-  else notifyUser('Call ended', 'Call ended manually.');
-}
-
-document.getElementById('endCallBtn').addEventListener('click', () => endCall(false));
-
-/* helpful initial message */
-appendStatus('Client ready. clientId=' + clientId + '. Enter room and click Join Room.');
-</script>
+    document.getElementById("endCallBtn").onclick = () => endCall(false);
+  </script>
 </body>
 </html>
