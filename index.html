@@ -10,7 +10,6 @@
     input, button { padding: 10px; margin: 5px; border-radius: 5px; border: none; }
     button { background: #4cafef; color: white; cursor: pointer; }
     button:hover { background: #3b8fd4; }
-    button:disabled { background: #888; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -27,7 +26,7 @@
   </div>
 
   <div>
-    <button id="startCallBtn" disabled>Start Call</button>
+    <button id="startCallBtn">Start Call</button>
     <button id="endCallBtn">End Call</button>
   </div>
 
@@ -37,68 +36,84 @@
   </div>
 
   <script>
+    // ---------- Supabase Setup ----------
     const SUPABASE_URL = "https://xlqvmsjauufwvxhplsmy.supabase.co";
-    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your real anon key
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhscXZtc2phdXVmd3Z4aHBsc215Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4MzI5NjYsImV4cCI6MjA3MzQwODk2Nn0.aywHn23wfmOXkHFoQ2Jix469JVuk9QG7fw9FrolnvfU"; // replace with your anon key
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-    let localStream, pc, roomName, role, callActive = false, timerId;
-    const clientId = crypto.randomUUID();
+    // ---------- Global Variables ----------
+    const clientId = crypto.randomUUID(); // keep constant per page load
+    let roomName = null;
+    let role = null;
+    let pc = null;
+    let localStream = null;
+    let callActive = false;
+    let timerId = null;
 
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
-    const startBtn = document.getElementById("startCallBtn");
 
-    // Join room
+    // ---------- Join Room ----------
     document.getElementById("joinBtn").onclick = async () => {
       roomName = document.getElementById("roomInput").value.trim();
       if (!roomName) return alert("Enter a room name!");
 
       try {
         const { data, error } = await supabaseClient.rpc('make_join', {
-  _room: roomName,
-  _clientid: clientId
-});
+          _room: roomName,
+          _clientid: clientId
+        });
 
-console.log("RPC data:", data);
-console.log("RPC error:", error);
+        console.log("RPC data:", data, "RPC error:", error);
 
-if (error) {
-    alert("RPC failed: " + error.message);
-    return;
-}
-
-role = data;
-alert(`Joined room as ${role}`);
-
-        startBtn.disabled = false; // enable start call
-      } catch (err) {
-        if (err.message === "room_full") {
-          alert("❌ Room already has 2 people!");
-        } else {
-          alert("❌ Error joining room: " + err.message);
+        if (error) {
+          if (error.message === "room_full") {
+            alert("❌ Room already has 2 participants.");
+          } else {
+            alert("❌ Error joining room: " + error.message);
+          }
+          return;
         }
+
+        role = data;
+        alert(`✅ Joined room "${roomName}" as ${role}`);
+        console.log(`Joined as ${role}`);
+      } catch (err) {
+        console.error("RPC failed:", err);
+        alert("❌ RPC failed. Check console.");
       }
     };
 
-    // Start call
-    startBtn.onclick = async () => {
+    // ---------- Start Call ----------
+    document.getElementById("startCallBtn").onclick = async () => {
       if (!roomName || !role) return alert("Join a room first!");
-      if (callActive) return;
+      if (callActive) return alert("Call already active!");
 
       callActive = true;
 
       // Get media
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+        console.log("🎥 Local media started");
+      } catch (err) {
+        console.error("Failed to get media:", err);
+        alert("❌ Cannot access camera/microphone.");
+        callActive = false;
+        return;
+      }
 
-      // Create peer connection
+      // Create PeerConnection
       pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
+      // Remote stream
       pc.ontrack = (event) => {
         remoteVideo.srcObject = event.streams[0];
+        console.log("🌐 Remote stream received");
       };
 
+      // ICE candidates
       pc.onicecandidate = async (event) => {
         if (event.candidate) {
           await supabaseClient.from("signals").insert({
@@ -107,11 +122,11 @@ alert(`Joined room as ${role}`);
             data: event.candidate.toJSON(),
             client_id: clientId
           });
-          console.log("📨 Sent ICE candidate.");
+          console.log("📨 Sent ICE candidate");
         }
       };
 
-      // Subscribe to signals
+      // Subscribe to room signals
       supabaseClient
         .channel("room-" + roomName)
         .on("postgres_changes", {
@@ -122,6 +137,7 @@ alert(`Joined room as ${role}`);
         }, async (payload) => {
           const { type, data, client_id } = payload.new;
           if (client_id === clientId) return; // ignore own signals
+
           if (!pc) return;
 
           if (type === "offer" && role === "callee") {
@@ -130,29 +146,35 @@ alert(`Joined room as ${role}`);
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             await supabaseClient.from("signals").insert({
-              room: roomName, type: "answer", data: answer, client_id: clientId
+              room: roomName,
+              type: "answer",
+              data: answer,
+              client_id: clientId
             });
           } else if (type === "answer" && role === "caller") {
-            console.log("📥 Got answer, setting remote description.");
+            console.log("📥 Got answer, setting remote description");
             await pc.setRemoteDescription(new RTCSessionDescription(data));
           } else if (type === "ice") {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(data));
-              console.log("📥 Added ICE candidate.");
+              console.log("📥 Added ICE candidate");
             } catch (e) {
-              console.error("Error adding ICE", e);
+              console.error("❌ Error adding ICE:", e);
             }
           }
         })
         .subscribe();
 
-      // Caller creates offer
+      // If caller, create offer
       if (role === "caller") {
         console.log("📞 You are the caller. Creating offer...");
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await supabaseClient.from("signals").insert({
-          room: roomName, type: "offer", data: offer, client_id: clientId
+          room: roomName,
+          type: "offer",
+          data: offer,
+          client_id: clientId
         });
       }
 
@@ -163,7 +185,7 @@ alert(`Joined room as ${role}`);
       }
     };
 
-    // End call
+    // ---------- End Call ----------
     function endCall(timerEnded = false) {
       if (!callActive) return;
       callActive = false;
@@ -184,16 +206,12 @@ alert(`Joined room as ${role}`);
         timerId = null;
       }
 
-      if (timerEnded) {
-        alert("⏰ Timer ended, call closed!");
-      } else {
-        alert("📞 Call ended manually.");
-      }
+      if (timerEnded) alert("⏰ Timer ended, call closed!");
+      else alert("📞 Call ended manually.");
     }
 
     document.getElementById("endCallBtn").onclick = () => endCall(false);
+
   </script>
 </body>
 </html>
-
-
